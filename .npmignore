@@ -1,0 +1,28 @@
+# Source files (dist is published)
+src/
+
+# Config files
+tsconfig.json
+.gitignore
+.eslintrc*
+.prettierrc*
+
+# Documentation (keep README.md and LICENSE)
+PROPOSAL.md
+PR_DESCRIPTION.md
+CONTRIBUTING.md
+CHANGELOG.md
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__/
+coverage/
+
+# Development
+.vscode/
+.idea/
+*.log
+
+# OS
+.DS_Store

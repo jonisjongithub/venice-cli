@@ -1,0 +1,59 @@
+{
+  "name": "venice-cli",
+  "version": "2.0.0",
+  "description": "Privacy-first command line interface for Venice AI",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "venice": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --test",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "ora": "^8.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "venice",
+    "ai",
+    "cli",
+    "llm",
+    "openai",
+    "chat",
+    "image-generation",
+    "text-to-speech",
+    "transcription",
+    "privacy"
+  ],
+  "author": "Venice AI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veniceai/venice-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/veniceai/venice-cli/issues"
+  },
+  "homepage": "https://venice.ai"
+}

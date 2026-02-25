@@ -1,0 +1,302 @@
+/**
+ * Chat Command - Interactive chat with AI models
+ */
+
+import { Command } from 'commander';
+import { randomUUID } from 'crypto';
+import {
+  chatCompletion,
+  chatCompletionStream,
+} from '../lib/api.js';
+import {
+  getDefaultModel,
+  addConversation,
+  getLastConversation,
+} from '../lib/config.js';
+import {
+  getToolDefinitions,
+  executeTool,
+  formatToolsHelp,
+} from '../lib/tools.js';
+import {
+  formatUsage,
+  formatError,
+  getChalk,
+  startSpinner,
+  clearSpinner,
+  detectOutputFormat,
+  isPiped,
+} from '../lib/output.js';
+import type { Message, OutputFormat } from '../types/index.js';
+
+export function registerChatCommand(program: Command): void {
+  program
+    .command('chat [prompt...]')
+    .description('Chat with an AI model')
+    .option('-m, --model <model>', 'Model to use')
+    .option('-s, --system <prompt>', 'System prompt')
+    .option('-c, --character <name>', 'Character/persona to use')
+    .option('-t, --tools <tools>', 'Comma-separated list of tools to enable')
+    .option('--interactive-tools', 'Require approval for each tool call')
+    .option('--continue', 'Continue the last conversation')
+    .option('--no-stream', 'Disable streaming output')
+    .option('-f, --format <format>', 'Output format (pretty|json|markdown|raw)')
+    .option('--list-tools', 'List available tools')
+    .action(async (promptParts: string[], options) => {
+      const c = getChalk();
+
+      // Handle --list-tools
+      if (options.listTools) {
+        console.log(formatToolsHelp());
+        return;
+      }
+
+      // Get prompt from args or stdin
+      let prompt = promptParts.join(' ');
+      
+      if (!prompt && !process.stdin.isTTY) {
+        // Read from stdin
+        prompt = await readStdin();
+      }
+
+      if (!prompt) {
+        console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
+        process.exit(1);
+      }
+
+      const model = options.model || getDefaultModel();
+      const format = detectOutputFormat(options.format);
+      const shouldStream = options.stream !== false && !isPiped() && format === 'pretty';
+
+      // Build messages array
+      const messages: Message[] = [];
+
+      // Handle --continue flag
+      if (options.continue) {
+        const lastConv = getLastConversation();
+        if (lastConv) {
+          // Cast messages to proper type
+          for (const msg of lastConv.messages) {
+            messages.push(msg as Message);
+          }
+          if (format === 'pretty') {
+            console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
+          }
+        }
+      }
+
+      // Add system prompt
+      if (options.system) {
+        messages.push({ role: 'system', content: options.system });
+      } else if (options.character) {
+        const systemPrompt = getCharacterPrompt(options.character);
+        if (systemPrompt) {
+          messages.push({ role: 'system', content: systemPrompt });
+        }
+      }
+
+      // Add user message
+      messages.push({ role: 'user', content: prompt });
+
+      // Get tool definitions
+      const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
+      const tools = getToolDefinitions(toolNames);
+
+      try {
+        if (shouldStream) {
+          await streamChat(messages, model, tools, options.interactiveTools, format);
+        } else {
+          await nonStreamChat(messages, model, tools, options.interactiveTools, format);
+        }
+
+        // Save to history
+        addConversation({
+          id: randomUUID(),
+          timestamp: new Date().toISOString(),
+          messages,
+          model,
+          character: options.character,
+        });
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+}
+
+async function streamChat(
+  messages: Message[],
+  model: string,
+  tools: ReturnType<typeof getToolDefinitions>,
+  interactiveTools: boolean,
+  format: OutputFormat
+): Promise<void> {
+  const c = getChalk();
+  const spinner = startSpinner('Thinking...');
+
+  let fullContent = '';
+  let collectedToolCalls: any[] = [];
+  let usage: any = null;
+
+  try {
+    for await (const chunk of chatCompletionStream(messages, { model, tools })) {
+      if (chunk.content) {
+        if (spinner) clearSpinner();
+        process.stdout.write(chunk.content);
+        fullContent += chunk.content;
+      }
+
+      if (chunk.tool_calls) {
+        collectedToolCalls.push(...chunk.tool_calls);
+      }
+
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
+
+      if (chunk.done) {
+        break;
+      }
+    }
+
+    // Handle tool calls
+    if (collectedToolCalls.length > 0) {
+      console.log('\n');
+      
+      for (const toolCall of collectedToolCalls) {
+        const args = JSON.parse(toolCall.function.arguments || '{}');
+        const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
+
+        console.log(c.dim(`\n[Tool: ${toolCall.function.name}]`));
+        console.log(result);
+
+        // Add tool result and get follow-up
+        messages.push({
+          role: 'assistant',
+          content: fullContent,
+          tool_calls: [toolCall],
+        });
+        messages.push({
+          role: 'tool',
+          content: result,
+          tool_call_id: toolCall.id,
+        });
+
+        // Get follow-up response
+        console.log('\n');
+        for await (const chunk of chatCompletionStream(messages, { model })) {
+          if (chunk.content) {
+            process.stdout.write(chunk.content);
+          }
+          if (chunk.usage) {
+            usage = chunk.usage;
+          }
+        }
+      }
+    }
+
+    console.log('\n');
+
+    // Show usage
+    if (usage && format === 'pretty') {
+      console.log(formatUsage(usage));
+    }
+  } catch (error) {
+    clearSpinner();
+    throw error;
+  }
+}
+
+async function nonStreamChat(
+  messages: Message[],
+  model: string,
+  tools: ReturnType<typeof getToolDefinitions>,
+  interactiveTools: boolean,
+  format: OutputFormat
+): Promise<void> {
+  const response = await chatCompletion(messages, { model, tools });
+
+  // Handle tool calls
+  if (response.tool_calls?.length) {
+    for (const toolCall of response.tool_calls) {
+      const args = JSON.parse(toolCall.function.arguments || '{}');
+      const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
+
+      messages.push({
+        role: 'assistant',
+        content: response.content,
+        tool_calls: [toolCall],
+      });
+      messages.push({
+        role: 'tool',
+        content: result,
+        tool_call_id: toolCall.id,
+      });
+    }
+
+    // Get follow-up
+    const followUp = await chatCompletion(messages, { model });
+    outputResponse(followUp.content, format);
+    
+    if (followUp.usage && format === 'pretty') {
+      console.log(formatUsage(followUp.usage));
+    }
+  } else {
+    outputResponse(response.content, format);
+    
+    if (response.usage && format === 'pretty') {
+      console.log(formatUsage(response.usage));
+    }
+  }
+}
+
+function outputResponse(content: string, format: OutputFormat): void {
+  switch (format) {
+    case 'json':
+      console.log(JSON.stringify({ content }, null, 2));
+      break;
+    case 'raw':
+    case 'markdown':
+      console.log(content);
+      break;
+    case 'pretty':
+    default:
+      console.log(content);
+      break;
+  }
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf-8').trim();
+}
+
+// Character prompts
+const CHARACTER_PROMPTS: Record<string, string> = {
+  pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
+  
+  wizard: 'You are a wise wizard. Speak in mystical terms, reference ancient knowledge, and occasionally make cryptic prophecies. Use archaic language.',
+  
+  scientist: 'You are a brilliant scientist. Explain things with precision, reference data and studies, and maintain intellectual rigor. Be curious and analytical.',
+  
+  poet: 'You are a romantic poet. Express yourself with beautiful language, metaphors, and emotional depth. Find beauty in everything.',
+  
+  coder: 'You are a senior software engineer. Be practical, reference best practices, and provide code examples when relevant. Value clean, maintainable solutions.',
+  
+  teacher: 'You are a patient teacher. Explain concepts clearly, use examples, and check for understanding. Encourage learning and curiosity.',
+  
+  comedian: 'You are a stand-up comedian. Find humor in everything, make jokes, use wordplay, and keep things light. But still be helpful!',
+  
+  philosopher: 'You are a deep philosopher. Question assumptions, explore ideas from multiple angles, and ponder the nature of existence. Be thoughtful and profound.',
+};
+
+function getCharacterPrompt(character: string): string | undefined {
+  return CHARACTER_PROMPTS[character.toLowerCase()];
+}
+
+export function getAvailableCharacters(): string[] {
+  return Object.keys(CHARACTER_PROMPTS);
+}
